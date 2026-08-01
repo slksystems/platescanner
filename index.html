@@ -1,0 +1,798 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Plate Scanner</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
+<style>
+  :root{
+    --bg:#000000;
+    --panel:#1E1E1E;
+    --panel2:#121212;
+    --green:#2E7D32;
+    --green-bright:#43A047;
+    --grey:#424242;
+    --text:#FFFFFF;
+    --text-dim:#AAAAAA;
+    --text-faint:#666666;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; background:var(--bg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--text);
+    height:100vh; height:100dvh;
+    overflow:hidden; /* the flex layout below handles fitting; internal panels scroll instead */
+  }
+  #splash{
+    position:fixed; inset:0; background:#000; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; z-index:50; transition:opacity .5s ease;
+  }
+  #splash svg{width:120px; height:120px;}
+  #splash h1{
+    font-size:24px; letter-spacing:2px; margin:16px 0 0 0; font-weight:700;
+  }
+  #splash p.tag{color:var(--text-dim); font-size:13px; margin:6px 0 0 0;}
+  #splash p.ver{color:var(--text-faint); font-size:11px; position:absolute; bottom:32px;}
+  #splash.hide{opacity:0; pointer-events:none;}
+
+  #app{
+    height:100vh; height:100dvh; display:flex; flex-direction:column;
+    visibility:hidden;
+  }
+  #app.show{visibility:visible;}
+
+  /* Camera can shrink on short screens, down to a usable minimum */
+  #cameraWrap{
+    position:relative; width:100%;
+    flex:1 1 260px; min-height:90px; max-height:min(30vh, 260px);
+    background:#000; overflow:hidden;
+  }
+  #cameraWrap video{width:100%; height:100%; object-fit:cover; display:block;}
+  #cameraOverlay{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--text-dim); font-size:14px; padding:24px; text-align:center;
+  }
+  #scanFlash{
+    position:absolute; inset:0; background:var(--green-bright); opacity:0;
+    pointer-events:none; transition:opacity .15s ease;
+  }
+  #scanFlash.on{opacity:0.35;}
+
+  #guideBox{
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:82%; aspect-ratio:4.4/1; max-height:68%;
+    border:3px solid var(--green-bright); border-radius:6px;
+    box-shadow:0 0 0 9999px rgba(0,0,0,0.4);
+    pointer-events:none; z-index:3;
+  }
+  #guideLabel{
+    position:absolute; top:8px; left:0; right:0; text-align:center;
+    color:#fff; font-size:12px; text-shadow:0 1px 3px rgba(0,0,0,0.8);
+    pointer-events:none; z-index:3;
+  }
+
+  #controls{
+    display:flex; padding:10px 10px 0 10px; gap:8px; flex:0 0 auto;
+  }
+  button{
+    font-family:inherit; border:none; border-radius:6px; color:#fff;
+    padding:12px 10px; font-size:14px; cursor:pointer; flex:1;
+  }
+  button:active{filter:brightness(0.85);}
+  button:disabled{opacity:0.4; cursor:default;}
+  #loadBtn{background:#2962FF;}
+  #manualBtn{background:#6A1B9A;}
+  #saveBtn{background:var(--grey);}
+
+  /* Result box can shrink but always keeps a readable minimum, and scrolls internally */
+  #resultPanel{
+    flex:2 1 60px; min-height:50px; background:var(--panel); margin:10px 10px 0 10px;
+    border-radius:6px; padding:12px; overflow-y:auto; font-size:15px; line-height:1.5;
+    white-space:pre-wrap; transition:background-color .3s ease;
+  }
+
+  #historyPanel{
+    flex:1 1 60px; min-height:34px; max-height:110px; background:var(--panel2); margin:8px 10px 0 10px;
+    border-radius:6px; padding:8px; overflow-y:auto; font-size:12px; color:var(--text-dim);
+    white-space:pre-wrap;
+  }
+
+  /* Never shrinks — this row must always stay visible */
+  #actionBar{
+    margin:10px; flex:0 0 56px; display:flex; gap:8px;
+  }
+  #scanBtn{
+    flex:1; font-size:18px; font-weight:600; border:none; border-radius:8px;
+    color:#fff; background:var(--green); cursor:pointer;
+  }
+  #confirmRow{
+    flex:1; display:none; gap:8px;
+  }
+  #confirmRow.show{ display:flex; }
+  #confirmMatchBtn, #rejectMatchBtn{
+    flex:1; font-size:14px; font-weight:600; border:none; border-radius:8px;
+    color:#fff; cursor:pointer; padding:4px;
+  }
+  #confirmMatchBtn{ background:var(--green-bright); }
+  #rejectMatchBtn{ background:#B71C1C; }
+
+  #fileStatus{
+    font-size:11px; color:var(--text-faint); text-align:center; padding-bottom:8px; flex:0 0 auto;
+  }
+
+  input[type=file]{display:none;}
+</style>
+</head>
+<body>
+
+<div id="splash">
+  <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="8" y="30" width="84" height="44" rx="8" stroke="#43A047" stroke-width="4"/>
+    <circle cx="50" cy="52" r="14" stroke="#43A047" stroke-width="4"/>
+    <rect x="34" y="20" width="14" height="10" rx="2" fill="#43A047"/>
+  </svg>
+  <h1>PLATE SCANNER</h1>
+  <p class="tag">Designed by SLK Systems &mdash; Web Edition</p>
+  <p class="ver">v1.0-web</p>
+</div>
+
+<div id="app">
+  <div id="cameraWrap">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="guideBox"></div>
+    <div id="guideLabel">Align plate within the box</div>
+    <div id="scanFlash"></div>
+    <div id="cameraOverlay"></div>
+  </div>
+
+  <div id="controls">
+    <button id="loadBtn">Load File</button>
+    <button id="manualBtn">Enter Plate</button>
+    <button id="saveBtn">Save / Export</button>
+  </div>
+  <div id="fileStatus">No file loaded</div>
+
+  <div id="resultPanel">Load a CSV or XLSX file, then point the camera at a number plate.</div>
+  <div id="historyPanel">Scan history:</div>
+
+  <div id="actionBar">
+    <button id="scanBtn">Scan Plate</button>
+    <div id="confirmRow">
+      <button id="confirmMatchBtn">✓ Confirm &amp; Save</button>
+      <button id="rejectMatchBtn">✕ Not a Match</button>
+    </div>
+  </div>
+  <input type="file" id="fileInput" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+</div>
+
+<canvas id="captureCanvas" style="display:none;"></canvas>
+
+<script>
+/*
+  Plate Scanner — Web Edition
+  Ported from the original Android app (CameraX + ML Kit + kotlin-csv/fastexcel).
+
+  Notes on parity with the Android version:
+  - OCR runs fully on-device in the browser via Tesseract.js (WebAssembly), same as
+    ML Kit ran on-device on Android. The Tesseract.js and SheetJS library files
+    themselves are fetched from a CDN the first time this page loads (browsers can't
+    bundle native libraries into a raw HTML file the way an APK can) — after that,
+    your browser will typically serve them from cache. All OCR, matching, and file
+    read/write logic runs entirely client-side; nothing is ever uploaded anywhere.
+  - "Save back to the same file" uses the File System Access API (Chrome / Edge /
+    Opera, desktop & Android). Where that API isn't available (Firefox, Safari,
+    iOS), the app falls back to downloading an updated copy, since the web has no
+    permission model for silently overwriting arbitrary files on those browsers.
+*/
+
+const els = {
+  splash: document.getElementById('splash'),
+  app: document.getElementById('app'),
+  video: document.getElementById('video'),
+  cameraWrap: document.getElementById('cameraWrap'),
+  cameraOverlay: document.getElementById('cameraOverlay'),
+  guideBox: document.getElementById('guideBox'),
+  scanFlash: document.getElementById('scanFlash'),
+  loadBtn: document.getElementById('loadBtn'),
+  manualBtn: document.getElementById('manualBtn'),
+  saveBtn: document.getElementById('saveBtn'),
+  fileInput: document.getElementById('fileInput'),
+  fileStatus: document.getElementById('fileStatus'),
+  resultPanel: document.getElementById('resultPanel'),
+  historyPanel: document.getElementById('historyPanel'),
+  scanBtn: document.getElementById('scanBtn'),
+  confirmRow: document.getElementById('confirmRow'),
+  confirmMatchBtn: document.getElementById('confirmMatchBtn'),
+  rejectMatchBtn: document.getElementById('rejectMatchBtn'),
+  canvas: document.getElementById('captureCanvas'),
+};
+
+// ---- state (mirrors MainActivity's fields) ----
+let csvHeader = [];
+let csvRows = [];
+let plateColumnIndex = 0;
+let statusColumnIndex = -1;
+let fileName = null;
+let fileExt = null;          // 'csv' or 'xlsx'
+let fileHandle = null;       // FileSystemFileHandle, when supported
+let matchedPlatesThisSession = new Set();
+let shouldScanNextFrame = false;
+let isRecognizing = false;
+let hasUnsavedChanges = false;
+let ocrWorker = null;
+let ocrReady = false;
+let pendingAction = null; // { type:'match', row, plate, rawText } | { type:'unmatched', plateText } awaiting confirmation
+let unmatchedRows = [];   // [plateText, timestamp] pairs — xlsx: written to an "Unmatched" sheet; csv: appended to the main rows instead
+const supportsFSAccess = 'showOpenFilePicker' in window;
+
+function refreshFileStatus(){
+  if (!fileName){ els.fileStatus.textContent = 'No file loaded'; return; }
+  if (fileHandle){
+    els.fileStatus.textContent = `${fileName} — saves write straight back to this file`;
+  } else if (hasUnsavedChanges){
+    els.fileStatus.textContent = `${fileName} — unsaved changes (tap Save / Export to download an updated copy)`;
+  } else {
+    els.fileStatus.textContent = `${fileName} — save will download a copy`;
+  }
+}
+
+// ---- splash screen (mirrors TitleActivity's 2.5s delay) ----
+setTimeout(() => {
+  els.splash.classList.add('hide');
+  els.app.classList.add('show');
+  setTimeout(() => els.splash.remove(), 600);
+  startCamera();
+  initOcrWorker();
+}, 2500);
+
+// ---- OCR worker (created once and reused, tuned for reading plates rather than
+// arbitrary scenes — this cuts down a lot of background noise being read as text) ----
+async function initOcrWorker(){
+  try{
+    ocrWorker = await Tesseract.createWorker('eng');
+    await ocrWorker.setParameters({
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ',
+      tessedit_pageseg_mode: '6', // assume a single uniform block of text — suits a close-up plate shot
+    });
+    ocrReady = true;
+  }catch(e){
+    console.error('Failed to initialize OCR engine', e);
+    els.resultPanel.textContent = 'Failed to load the OCR engine. Check your internet connection and reload.';
+  }
+}
+
+// ---- camera ----
+async function startCamera(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+      audio: false,
+    });
+    els.video.srcObject = stream;
+    els.cameraOverlay.textContent = '';
+  }catch(e){
+    console.error('Camera error', e);
+    els.cameraOverlay.textContent = 'Camera permission is required to scan plates.';
+  }
+}
+
+// ---- manual entry ----
+els.manualBtn.addEventListener('click', () => {
+  if (csvRows.length === 0){
+    els.resultPanel.textContent = 'Please load a file first.';
+    return;
+  }
+  if (pendingAction){
+    els.resultPanel.textContent = 'Confirm or reject the current item first.';
+    return;
+  }
+  const input = window.prompt('Enter plate number:');
+  if (input === null) return; // cancelled
+  const trimmedInput = input.trim();
+
+  const normalized = normalizePlate(input);
+  if (!normalized){
+    els.resultPanel.textContent = 'Please enter a valid plate.';
+    return;
+  }
+
+  for (const row of csvRows){
+    const normalizedCell = normalizePlate(row[plateColumnIndex] ?? '');
+    if (normalizedCell === normalized){
+      showMatchPreview(row, normalizedCell, `Manually entered: "${input}"`);
+      return;
+    }
+  }
+
+  showUnmatchedPreview(trimmedInput);
+});
+
+// ---- file loading ----
+els.loadBtn.addEventListener('click', async () => {
+  if (supportsFSAccess){
+    try{
+      const [handle] = await window.showOpenFilePicker({
+        types: [{
+          description: 'Spreadsheet',
+          accept: {
+            'text/csv': ['.csv'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+          },
+        }],
+      });
+      fileHandle = handle;
+      const file = await handle.getFile();
+      await loadFile(file);
+    }catch(e){
+      if (e.name !== 'AbortError') console.error(e);
+    }
+  } else {
+    els.fileInput.click();
+  }
+});
+
+els.fileInput.addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  fileHandle = null; // no writable handle via plain <input type=file>
+  if (file) await loadFile(file);
+});
+
+async function loadFile(file){
+  fileName = file.name;
+  fileExt = fileName.toLowerCase().endsWith('.xlsx') ? 'xlsx' : 'csv';
+
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+
+    const unmatchedSheetName = wb.SheetNames.find(n => n.toLowerCase() === 'unmatched');
+    const mainSheetName = wb.SheetNames.find(n => n !== unmatchedSheetName) || wb.SheetNames[0];
+    const sheet = wb.Sheets[mainSheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+
+    csvHeader = [];
+    csvRows = [];
+
+    if (rows.length > 0){
+      csvHeader = rows[0].map(v => String(v));
+      for (let i = 1; i < rows.length; i++){
+        csvRows.push(rows[i].map(v => String(v)));
+      }
+    }
+
+    // Pick up any unmatched entries already saved from a previous session
+    if (unmatchedSheetName){
+      const uRows = XLSX.utils.sheet_to_json(wb.Sheets[unmatchedSheetName], { header: 1, defval: '', raw: false });
+      unmatchedRows = uRows.slice(1).map(r => [String(r[0] ?? ''), String(r[1] ?? '')]);
+    } else {
+      unmatchedRows = [];
+    }
+  }catch(err){
+    console.error('Failed to load file', err);
+    els.resultPanel.textContent = 'Failed to load data or file is empty.';
+    return;
+  }
+
+  if (csvHeader.length === 0){
+    els.resultPanel.textContent = 'Failed to load data or file is empty.';
+    return;
+  }
+
+  // Auto-detect the plate column
+  plateColumnIndex = csvHeader.findIndex(h => {
+    const l = h.toLowerCase();
+    return l.includes('plate') || l.includes('reg');
+  });
+  if (plateColumnIndex === -1) plateColumnIndex = 0;
+
+  // Find or create a status column
+  statusColumnIndex = csvHeader.findIndex(h => {
+    const l = h.toLowerCase();
+    return l.includes('status') || l.includes('scan');
+  });
+  if (statusColumnIndex === -1){
+    csvHeader.push('SCAN_STATUS');
+    statusColumnIndex = csvHeader.length - 1;
+    for (const row of csvRows){
+      while (row.length < csvHeader.length) row.push('');
+    }
+  }
+
+  matchedPlatesThisSession.clear();
+  hasUnsavedChanges = false;
+  refreshFileStatus();
+  els.resultPanel.textContent =
+    `Loaded ${csvRows.length} rows.\nPlate column: "${csvHeader[plateColumnIndex] ?? ''}"\n\nPoint the camera at a plate.`;
+}
+
+// ---- saving ----
+els.saveBtn.addEventListener('click', saveData);
+
+async function saveData(){
+  if (!fileName || csvHeader.length === 0) return;
+
+  const aoa = [csvHeader, ...csvRows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+
+  if (fileExt === 'xlsx' && unmatchedRows.length > 0){
+    const uAoa = [['Plate', 'Entered At'], ...unmatchedRows];
+    const uWs = XLSX.utils.aoa_to_sheet(uAoa);
+    XLSX.utils.book_append_sheet(wb, uWs, 'Unmatched');
+  }
+
+  const bookType = fileExt === 'xlsx' ? 'xlsx' : 'csv';
+  const out = XLSX.write(wb, { bookType, type: 'array' });
+  const mime = fileExt === 'xlsx'
+    ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    : 'text/csv';
+  const blob = new Blob([out], { type: mime });
+
+  if (fileHandle){
+    try{
+      const writable = await fileHandle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      hasUnsavedChanges = false;
+      refreshFileStatus();
+      return;
+    }catch(e){
+      console.error('In-place save failed, falling back to download', e);
+    }
+  }
+
+  // Fallback: download an updated copy
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  hasUnsavedChanges = false;
+  refreshFileStatus();
+}
+
+// ---- scanning ----
+els.scanBtn.addEventListener('click', () => {
+  if (csvRows.length === 0){
+    els.resultPanel.textContent = 'Please load a file first.';
+    return;
+  }
+  if (isRecognizing) return;
+  shouldScanNextFrame = true;
+  els.resultPanel.textContent = 'Scanning…';
+  captureAndRecognize();
+});
+
+// The <video> element uses object-fit:cover, which crops the displayed image to
+// fill its box — so the guide box's on-screen position doesn't map 1:1 to the raw
+// camera frame. This works out the actual pixel region of the raw video frame
+// that corresponds to what's inside the visible guide box.
+function getGuideBoxInVideoPixels(video){
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+
+  const containerRect = els.cameraWrap.getBoundingClientRect();
+  const guideRect = els.guideBox.getBoundingClientRect();
+  const cw = containerRect.width, ch = containerRect.height;
+  if (!cw || !ch) return null;
+
+  const videoAspect = vw / vh;
+  const containerAspect = cw / ch;
+
+  // How the raw video is scaled/cropped by object-fit:cover to fill the container
+  let renderedW, renderedH, cropX, cropY;
+  if (videoAspect > containerAspect){
+    renderedH = ch;
+    renderedW = ch * videoAspect;
+    cropX = (renderedW - cw) / 2;
+    cropY = 0;
+  } else {
+    renderedW = cw;
+    renderedH = cw / videoAspect;
+    cropX = 0;
+    cropY = (renderedH - ch) / 2;
+  }
+  const scale = vw / renderedW; // container-space pixels -> raw video pixels
+
+  const gx = guideRect.left - containerRect.left;
+  const gy = guideRect.top - containerRect.top;
+
+  const x = (gx + cropX) * scale;
+  const y = (gy + cropY) * scale;
+  const w = guideRect.width * scale;
+  const h = guideRect.height * scale;
+
+  return {
+    x: Math.max(0, Math.round(x)),
+    y: Math.max(0, Math.round(y)),
+    w: Math.min(Math.round(w), vw - Math.max(0, Math.round(x))),
+    h: Math.min(Math.round(h), vh - Math.max(0, Math.round(y))),
+  };
+}
+
+async function captureAndRecognize(){
+  if (!shouldScanNextFrame || csvRows.length === 0) return;
+  shouldScanNextFrame = false;
+
+  if (!ocrReady || !ocrWorker){
+    els.resultPanel.textContent = 'OCR engine is still loading — try again in a moment.';
+    return;
+  }
+
+  const video = els.video;
+  if (!video.videoWidth){
+    els.resultPanel.textContent = 'Camera not ready yet — try again.';
+    return;
+  }
+
+  const canvas = els.canvas;
+  const guideRect = getGuideBoxInVideoPixels(video);
+
+  if (guideRect){
+    canvas.width = guideRect.w;
+    canvas.height = guideRect.h;
+    canvas.getContext('2d').drawImage(
+      video,
+      guideRect.x, guideRect.y, guideRect.w, guideRect.h, // source: cropped region of the raw frame
+      0, 0, guideRect.w, guideRect.h                      // dest: fills the whole canvas
+    );
+  } else {
+    // Fallback if the guide box geometry can't be read for some reason — use the full frame
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  }
+
+  // Phone cameras often capture at very high resolution (3000px+ wide). Feeding
+  // that straight into Tesseract tends to hurt accuracy — it over-segments fine
+  // detail (reflections, chrome texture) into lots of tiny false "text" blobs
+  // instead of reading the plate as one clear block. Downscale to a size that
+  // works well in practice before OCR.
+  const OCR_MAX_DIM = 1400;
+  let ocrCanvas = canvas;
+  const largestDim = Math.max(canvas.width, canvas.height);
+  if (largestDim > OCR_MAX_DIM){
+    const scale = OCR_MAX_DIM / largestDim;
+    ocrCanvas = document.createElement('canvas');
+    ocrCanvas.width = Math.round(canvas.width * scale);
+    ocrCanvas.height = Math.round(canvas.height * scale);
+    ocrCanvas.getContext('2d').drawImage(canvas, 0, 0, ocrCanvas.width, ocrCanvas.height);
+  }
+
+  isRecognizing = true;
+  try{
+    const { data } = await ocrWorker.recognize(ocrCanvas);
+    handleRecognizedText(data);
+  }catch(e){
+    console.error('Recognition failed', e);
+    els.resultPanel.textContent = `Recognition error: ${e.message || e}`;
+  }finally{
+    isRecognizing = false;
+  }
+}
+
+function normalizePlate(s){
+  return s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// Plates are a handful of characters — reject anything shorter/longer than that
+// range before it's even considered as a candidate, since very short strings are
+// the most common source of accidental matches against noise.
+const MIN_PLATE_LEN = 4;
+const MAX_PLATE_LEN = 10;
+
+function handleRecognizedText(data){
+  const rawText = (data.text || '').trim();
+  if (!rawText){
+    els.resultPanel.textContent = 'No text detected in the frame.';
+    return;
+  }
+
+  // Every recognized word is used as a starting point — with a confirm step now
+  // in front of every match, a wrong guess just costs a rejected tap, whereas
+  // filtering out a real plate for "low confidence" costs a missed scan. So the
+  // real filtering happens via exact/fuzzy matching against your actual CSV data
+  // plus your own eyes on the confirm screen, not via Tesseract's confidence score.
+  //
+  // Words are grouped by line, and candidates are built from consecutive words
+  // *within the same line only* (1, 2, 3, or 4 in a row) — this catches a plate
+  // that OCR splits into several fragments (e.g. "AF" "75" "URR") without
+  // accidentally gluing together unrelated words from other lines in the frame.
+  function lineTokenGroups(){
+    if (data.lines && data.lines.length){
+      return data.lines.map(line => {
+        if (line.words && line.words.length){
+          return line.words.map(w => normalizePlate(w.text)).filter(Boolean);
+        }
+        return (line.text || '').split(/\s+/).map(normalizePlate).filter(Boolean);
+      });
+    }
+    // No line grouping available from this Tesseract build — fall back to
+    // treating every recognized word as one group.
+    const words = (data.words || []).map(w => normalizePlate(w.text)).filter(Boolean);
+    return words.length ? [words] : [];
+  }
+
+  const candidates = new Set();
+  const MAX_WORDS_PER_CANDIDATE = 4;
+  for (const tokens of lineTokenGroups()){
+    for (let i = 0; i < tokens.length; i++){
+      let combined = '';
+      for (let j = i; j < Math.min(i + MAX_WORDS_PER_CANDIDATE, tokens.length); j++){
+        combined += tokens[j];
+        candidates.add(combined);
+      }
+    }
+  }
+
+  // Plates sometimes pick up one stray character from something beside the actual
+  // characters (e.g. the coloured side stripe on UK/EU plates getting read as a
+  // letter). Try dropping a leading/trailing character from every candidate,
+  // including combined multi-word ones — this is what catches a read like
+  // "AMC73YVM" (one stray leading letter) resolving to the real "MC73YVM".
+  for (const c of Array.from(candidates)){
+    if (c.length > MIN_PLATE_LEN){
+      candidates.add(c.slice(1));
+      candidates.add(c.slice(0, -1));
+    }
+  }
+
+  // Enforce a sane plate-length range before matching
+  for (const c of Array.from(candidates)){
+    if (c.length < MIN_PLATE_LEN || c.length > MAX_PLATE_LEN) candidates.delete(c);
+  }
+
+  if (candidates.size === 0){
+    els.resultPanel.textContent = `Detected text doesn't look like a plate:\n"${rawText}"`;
+    return;
+  }
+
+  // Try an exact match across the whole CSV first
+  for (const row of csvRows){
+    const normalizedCell = normalizePlate(row[plateColumnIndex] ?? '');
+    if (normalizedCell && candidates.has(normalizedCell)){
+      showMatchPreview(row, normalizedCell, rawText);
+      return;
+    }
+  }
+
+  // Only if nothing matched exactly, fall back to treating O/0 and I/1 as
+  // interchangeable — these are the two mix-ups actually seen in testing.
+  // Kept narrow deliberately: more substitution pairs means more chances of
+  // landing on the wrong plate.
+  function canonicalize(s){
+    return s.replace(/O/g, '0').replace(/I/g, '1');
+  }
+  const canonicalCandidates = new Set(Array.from(candidates, canonicalize));
+
+  for (const row of csvRows){
+    const normalizedCell = normalizePlate(row[plateColumnIndex] ?? '');
+    if (normalizedCell && canonicalCandidates.has(canonicalize(normalizedCell))){
+      showMatchPreview(row, normalizedCell, rawText);
+      return;
+    }
+  }
+
+  els.resultPanel.textContent = `No match in CSV for detected text:\n"${rawText}"`;
+}
+
+function showMatchPreview(row, plate, rawText){
+  pendingAction = { type: 'match', row, plate, rawText };
+  const rowSummary = csvHeader.map((h, i) => `${h}: ${row[i] ?? ''}`).join('\n');
+  els.resultPanel.textContent =
+    `OCR read: "${rawText}"\n\nPossible match: ${plate}\n\n${rowSummary}\n\nCheck this against the plate, then confirm or reject.`;
+  els.confirmMatchBtn.textContent = '✓ Confirm & Save';
+  els.rejectMatchBtn.textContent = '✕ Not a Match';
+  els.scanBtn.style.display = 'none';
+  els.confirmRow.classList.add('show');
+}
+
+function showUnmatchedPreview(plateText){
+  pendingAction = { type: 'unmatched', plateText };
+  const destination = fileExt === 'xlsx'
+    ? 'a separate "Unmatched" sheet in this file'
+    : 'the bottom of this file, flagged as unmatched';
+  els.resultPanel.textContent =
+    `No match in CSV for entered plate:\n"${plateText}"\n\nAdd it to ${destination}?`;
+  els.confirmMatchBtn.textContent = '✓ Add as Unmatched';
+  els.rejectMatchBtn.textContent = '✕ Cancel';
+  els.scanBtn.style.display = 'none';
+  els.confirmRow.classList.add('show');
+}
+
+els.confirmMatchBtn.addEventListener('click', async () => {
+  if (!pendingAction) return;
+  const action = pendingAction;
+  pendingAction = null;
+  els.confirmRow.classList.remove('show');
+  els.scanBtn.style.display = '';
+  if (action.type === 'match'){
+    await onPlateMatched(action.row, action.plate);
+  } else if (action.type === 'unmatched'){
+    await addUnmatchedEntry(action.plateText);
+  }
+});
+
+els.rejectMatchBtn.addEventListener('click', () => {
+  const wasUnmatched = pendingAction && pendingAction.type === 'unmatched';
+  pendingAction = null;
+  els.confirmRow.classList.remove('show');
+  els.scanBtn.style.display = '';
+  els.resultPanel.textContent = wasUnmatched
+    ? 'Cancelled — nothing added.'
+    : 'Match dismissed — no changes made. Try scanning again.';
+});
+
+async function onPlateMatched(row, plate){
+  els.scanFlash.classList.add('on');
+  setTimeout(() => els.scanFlash.classList.remove('on'), 400);
+
+  const now = new Date();
+  const timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
+  const rowSummary = csvHeader.map((h, i) => `${h}: ${row[i] ?? ''}`).join('\n');
+  els.resultPanel.textContent = `MATCH FOUND: ${plate}\n\n${rowSummary}`;
+
+  if (!matchedPlatesThisSession.has(plate)){
+    matchedPlatesThisSession.add(plate);
+    row[statusColumnIndex] = `SCANNED ${timestamp}`;
+
+    if (fileHandle){
+      // We have a real writable handle (desktop Chrome/Edge) — write straight back,
+      // no dialog, exactly like the Android app did.
+      try{
+        await saveData();
+        els.historyPanel.textContent += `\n✓ ${plate} matched at ${timestamp} (saved)`;
+      }catch(e){
+        els.historyPanel.textContent += `\n⚠ ${plate} matched, but save failed: ${e.message || e}`;
+      }
+    } else {
+      // No writable handle available on this browser — don't trigger a download
+      // (and its save-location popup) on every single scan. Just track the change
+      // in memory; the user taps "Save / Export" once they're done scanning.
+      hasUnsavedChanges = true;
+      els.historyPanel.textContent += `\n✓ ${plate} matched at ${timestamp} (unsaved — tap Save / Export)`;
+    }
+    refreshFileStatus();
+    els.historyPanel.scrollTop = els.historyPanel.scrollHeight;
+  }
+}
+
+async function addUnmatchedEntry(plateText){
+  const now = new Date();
+  const timestamp = now.toISOString().slice(0, 19).replace('T', ' ');
+
+  if (fileExt === 'xlsx'){
+    unmatchedRows.push([plateText, timestamp]);
+  } else {
+    const newRow = new Array(csvHeader.length).fill('');
+    newRow[plateColumnIndex] = plateText;
+    if (statusColumnIndex >= 0) newRow[statusColumnIndex] = `UNMATCHED - MANUAL ENTRY ${timestamp}`;
+    csvRows.push(newRow);
+  }
+
+  els.resultPanel.textContent = `Added "${plateText}" as unmatched at ${timestamp}.`;
+
+  if (fileHandle){
+    try{
+      await saveData();
+      els.historyPanel.textContent += `\n+ ${plateText} added as unmatched at ${timestamp} (saved)`;
+    }catch(e){
+      els.historyPanel.textContent += `\n⚠ ${plateText} added as unmatched, but save failed: ${e.message || e}`;
+    }
+  } else {
+    hasUnsavedChanges = true;
+    els.historyPanel.textContent += `\n+ ${plateText} added as unmatched at ${timestamp} (unsaved — tap Save / Export)`;
+  }
+  refreshFileStatus();
+  els.historyPanel.scrollTop = els.historyPanel.scrollHeight;
+}
+</script>
+</body>
+</html>
